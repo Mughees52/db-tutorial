@@ -1,0 +1,101 @@
+[root@centos-m-4vcpu-32gb-lon1-01 ~]# crontab -l
+0 3 * * * /root/maintain_mydumper.sh
+0 0 * * * /usr/sbin/holland -d backup xtrabackup
+[root@centos-m-4vcpu-32gb-lon1-01 ~]# cat /root/maintain_mydumper.sh
+#!/bin/bash
+
+exec 1> >(logger -s -t $(basename $0)) 2>&1
+
+if [ -f /tmp/$(basename $0).pid ]; then
+    RUNNING_PID=`cat /tmp/$(basename $0).pid`
+    if ps -p $RUNNING_PID > /dev/null; then
+        echo "$(basename $0) already running"
+        exit 5
+    else
+        echo "$(basename $0) has stale pid file. removing"
+        rm /tmp/$(basename $0).pid
+    fi
+fi
+
+echo $$ > /tmp/$(basename $0).pid
+
+MYSQL_USER="root"
+MYSQL_PASS="ahGhahqu8eeCesh"
+
+BACKUP_DATE=`/bin/date +%Y%m%d`
+BACKUP_DAY=`/bin/date +%-d`
+
+if  [[ 40 -gt 14 ]]; then
+    NUM_OF_CORES=4
+else
+    NUM_OF_CORES=4
+fi
+
+#if [[ ${HOSTNAME} == ???-*-ebackup?? ]]; then
+#    if (( ${BACKUP_DAY} % 2 )) && (( ${HOSTNAME: -1} % 2 )); then
+#        echo "backup running on $HOSTNAME (odd) on $BACKUP_DAY dom (odd)."
+#        BACKUP_SOURCE="127.0.0.1"
+#    elif ! (( ${BACKUP_DAY} % 2 )) && ! (( ${HOSTNAME: -1} % 2 )); then
+#        echo "backup running on $HOSTNAME (even) on $BACKUP_DAY dom (even)."
+#        BACKUP_SOURCE="127.0.0.1"
+#    else
+#        echo "backup running on $HOSTNAME on $BACKUP_DAY dom. the backup is supposed to run on the other host (odd/even rule). refusing to run."
+#    fi
+#    MYDUMPER_EXTRA_OPTS=" --rows 100000"
+#  elif ! [[ ${$HOSTNAME} == ???-*-lon1-01?? ]]; then
+#	BACKUP_SOURCE="127.0.0.1"
+#else
+#    echo "running on a host not matching the backup hostname rules. refusing to run."
+#    exit 10
+#fi
+BACKUP_SOURCE="127.0.0.1"
+echo "running backup for today the ${BACKUP_DATE}"
+echo "threading with ${NUM_OF_CORES} workers"
+
+# We assume one backup per day
+# Keep in mind that we distribute the backups on two backup nodes. Each backup node contains backups from the last 45 days
+NUM_BACKUPS_TO_KEEP=6
+
+if [ -d /data/backup/mysqldump/${BACKUP_DATE} ]; then
+    echo "there is already a backup dir"
+    if [ -f /mnt/backupdir_mysql_backupserver/${BACKUP_DATE}/mydumper.success ]; then
+        echo "the backup seems fine. nothing to do."
+        rm /tmp/$(basename $0).pid
+        exit 0
+    else
+        echo "we have no success status for this backup. cleaning dir and redoing backup"
+        rm -Rf /mnt/backupdir_mysql_backupserver/${BACKUP_DATE}/*
+    fi
+else
+    echo "creating backup dir /mnt/backupdir_mysql_backupserver/${BACKUP_DATE}"
+    mkdir -p /mnt/backupdir_mysql_backupserver/${BACKUP_DATE}
+fi
+
+/usr/bin/mydumper -h ${BACKUP_SOURCE} -c -o /mnt/backupdir_mysql_backupserver/${BACKUP_DATE} --user root --password ahGhahqu8eeCesh --long-query-guard 3600 -t ${NUM_OF_CORES} ${MYDUMPER_EXTRA_OPTS}
+
+DUMPER_RETURN=$?
+echo "${DUMPER_RETURN}" > /mnt/backupdir_mysql_backupserver/${BACKUP_DATE}/mydumper.return
+
+if [ ${DUMPER_RETURN} -eq 0 ]; then
+    echo "mydumper return without error"
+    touch /mnt/backupdir_mysql_backupserver/${BACKUP_DATE}/mydumper.success
+
+    NUM_BACKUPS_CURRENT=`find /mnt/backupdir_mysql_backupserver -mindepth 1 -maxdepth 1 -type d | wc -l`
+
+    if [ $NUM_BACKUPS_CURRENT -gt $NUM_BACKUPS_TO_KEEP ]; then
+        echo "found ${NUM_BACKUPS_CURRENT} backups. cleaning up"
+        find /mnt/backupdir_mysql_backupserver-mindepth 1 -maxdepth 1 -type d -mtime +${NUM_BACKUPS_TO_KEEP} -exec rm -rf {} \;
+    else
+        echo "found ${NUM_BACKUPS_CURRENT} backups. No need to delete anything."
+    fi
+else
+    echo "mydumper returned with error ${DUMPER_RETURN}. Watch if the next run solves the problem."
+fi
+
+rm /tmp/$(basename $0).pid
+cd /mnt/backupdir_mysql_backupserver/
+ydt=`date +%Y%m%d -d" 5 day ago"`
+echo $ydt
+rm -rf $ydt
+
+[root@centos-m-4vcpu-32gb-lon1-01 ~]#
